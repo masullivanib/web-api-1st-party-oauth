@@ -1,0 +1,7 @@
+{
+    "consumer_fp": "./consumer.json",
+    "access_fp": "./access.json",
+    "lst_cache_fp": "./lst_cache.json",
+    "session_cache_fp": "./session_cache.json",
+    "log_dir": "./logs"
+}
