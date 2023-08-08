@@ -93,6 +93,10 @@ dh_random = random.getrandbits(256)
 # Convert result to hex and remove leading 0x chars.
 dh_challenge = hex(pow(base=dh_generator, exp=dh_random, mod=dh_prime))[2:]
 
+# --------------------------------
+# Generate LST request signature.
+# --------------------------------
+
 # Generate the base string prepend for the OAuth signature:
 # Decrypt the access token secret bytestring using private encryption
 # key as RSA key and PKCS1v1.5 padding.
