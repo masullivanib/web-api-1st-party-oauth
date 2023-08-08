@@ -1,5 +1,8 @@
 """
-Simple test script to generate LST and make request to /portfolio/accounts.
+Simple test script to demonstrate generating and using a Live Session Token
+in a first-party OAuth context. Assumes access token and access token secret
+have been generated and stored via IB's nodeJS OAuth demo or OAuth Self-Service 
+Portal.
 
 Requires Python packages: pycryptodome, requests
 
@@ -18,21 +21,30 @@ from Crypto.Signature import PKCS1_v1_5 as PKCS1_v1_5_Signature
 from Crypto.Cipher import PKCS1_v1_5 as PKCS1_v1_5_Cipher
 from Crypto.Hash import SHA256, HMAC, SHA1
 
+# List of response headers to print (all others discarded)
+RESP_HEADERS_TO_PRINT = ["Content-Type", "Content-Length", "Date", "Set-Cookie", "User-Agent"]
+
 def pretty_request_response(resp: requests.Response) -> str:
-    """Helper function to print requests and responses nicely """
+    """Print request and response legibly."""
     req = resp.request
-    req_heads = '\n'.join(f"{k}: {v}" for k, v in req.headers.items()).replace(', ', ',\n    ')
-    req_body = f"\n{pprint.pformat(json.loads(req.body))}\n" if req.body else ""
+    rqh = '\n'.join(f"{k}: {v}" for k, v in req.headers.items())
+    rqh = rqh.replace(', ', ',\n    ')
+    rqb = f"\n{pprint.pformat(json.loads(req.body))}\n" if req.body else ""
     try:
-        resp_body = f"\n{pprint.pformat(resp.json())}\n" if resp.text else ""
+        rsb = f"\n{pprint.pformat(resp.json())}\n" if resp.text else ""
     except json.JSONDecodeError:
-        resp_body = resp.text
-    resp_heads = '\n'.join([f"{k}: {v}" for k,v in resp.headers.items() if k in ("Content-Type", "Content-Length", "Date")])
+        rsb = resp.text
+    rsh = '\n'.join([f"{k}: {v}" for k, v in resp.headers.items() if k in RESP_HEADERS_TO_PRINT])
     return_str = '\n'.join([
-        80*'-' + '\n-----------REQUEST-----------',
-        f"{req.method} {req.url}\n{req_heads}\n{req_body}",
+        80*'-',
+        '-----------REQUEST-----------',
+        f"{req.method} {req.url}",
+        rqh,
+        f"{rqb}",
         '-----------RESPONSE-----------',
-        f"{resp.status_code} {resp.reason}\n{resp_heads}\n{resp_body}\n",
+        f"{resp.status_code} {resp.reason}",
+        rsh,
+        f"{rsb}\n",
     ])
     return return_str
 
@@ -40,47 +52,63 @@ def pretty_request_response(resp: requests.Response) -> str:
 # Prequisites: Enter paths to keys and access token/secret below
 # -------------------------------------------------------------------
 
-# replace with relative path to private encryption key file
-with open("./config/TESTCONS-emuri0718/private_encryption.pem", "r") as f:
+# Replace with path to private encryption key file.
+with open("./path/to/private_encryption.pem", "r") as f:
     encryption_key = RSA.importKey(f.read())
 
-# replace with relative path to private signature key file
-with open("./config/TESTCONS-emuri0718/private_signature.pem", "r") as f:
+# Replace with path to private signature key file.
+with open("./path/to/private_signature.pem", "r") as f:
     signature_key = RSA.importKey(f.read())
 
-# replace with relative path to DH prime
-# this expects just the prime by itself, as hex, extracted from pem file via asn1parse,
-# as it appears in our node.js demo in the "prime" field at the top.
-with open("./config/TESTCONS-emuri0718/dh_prime.txt", "r") as f:
-    dh_prime = f.read()
+# Replace with path to DH prime PEM file.
+with open("./path/to/dhparam.pem", "r") as f:
+    dh_param = RSA.importKey(f.read())
+    dh_prime = dh_param.n
+    dh_generator = dh_param.e  # always =2
 
-# paste your access token and access token secret here
-access_token = "833b7639fa9fec53645d"
-access_token_secret = "jT5EuyJ/1UlyydPIAux94cz8SuHu8+t8y2geKtUzrzl4tCJYTTah+A+LyDdwgVA2lZt3LSVQpYn8l7Za2J9M+65U7xVflo5ynyfxv6BERBd//W07SFuT9/9pFHed5D1EBrUMh7sk/yRBHHmSloqPpstg3L4L3T2FhDjGhOSJ0DnlBtlIXyEJSm4jc8rGrvunXx1kCFrwdlpyrEBglCmtG+jfk9nMOhuRD3oiitPNYcMH9zHyQsY1wm6ujclXvjk1guGxIw4bHz0/fLs83IMY3aRPpr4l58cxATfjkI2MyvMNwr6wa9hqwdeJfXH8iOIFTNCNrjWKCW68Mv4yol9epQ=="
+# Enter your access token and access token secret here.
+access_token = ""
+access_token_secret = ""
 
-consumer_key = "DOMINIONC"
-realm = "limited_poa" # test_realm is for TESTCONS only; all others limited_poa
+# If substituting your own consumer key created via the Self-Service Portal,
+# change realm to "limited_poa" (test_realm is for TESTCONS only).
+consumer_key = "TESTCONS"
+realm = "test_realm"
 
 session_object = requests.Session()
-
 live_session_token = None
 lst_expiration = None
+session_cookie = None
 
 # -------------------------------------------------------------------
 # Request #1: Obtaining a LST
 # -------------------------------------------------------------------
 
-# compute DH challenge for /live_session_token request
-dh_random = hex(random.getrandbits(256))[2:]
-dh_challenge = hex(pow(2, int(dh_random, 16), int(dh_prime, 16)))[2:]
+# Generate a random 256-bit integer.
+dh_random = random.getrandbits(256)
 
-# make prepend for /live_session_token request
-access_token_secret_bytes = base64.b64decode(access_token_secret)
-cipher = PKCS1_v1_5_Cipher.new(encryption_key)
-prepend = cipher.decrypt(access_token_secret_bytes, None).hex()
+# Compute the Diffie-Hellman challenge:
+# generator ^ dh_random % dh_prime
+# Note that IB always uses generator = 2.
+# Convert result to hex and remove leading 0x chars.
+dh_challenge = hex(pow(base=dh_generator, exp=dh_random, mod=dh_prime))[2:]
 
-# build signature base string with prepend for /live_session_token request
+# Generate the base string prepend for the OAuth signature:
+# Decrypt the access token secret bytestring using private encryption
+# key as RSA key and PKCS1v1.5 padding.
+# Prepend is the resulting bytestring converted to hex str.
+bytes_decrypted_secret = PKCS1_v1_5_Cipher.new(
+    key=encryption_key
+    ).decrypt(
+        ciphertext=base64.b64decode(access_token_secret), 
+        sentinel=None,
+        )
+prepend = bytes_decrypted_secret.hex()
+
+# Put prepend at beginning of base string str.
 base_string = prepend
+
+# Elements of the LST request so far.
 method = 'POST'
 url = 'https://api.ibkr.com/v1/api/oauth/live_session_token'
 oauth_params = {
@@ -91,63 +119,124 @@ oauth_params = {
     "oauth_signature_method": "RSA-SHA256",
     "diffie_hellman_challenge": dh_challenge,
 }
+
+# Combined param key=value pairs must be sorted alphabetically by key
+# and ampersand-separated.
 params_string = "&".join([f"{k}={v}" for k, v in sorted(oauth_params.items())])
+
+# Base string = method + url + sorted params string, all URL-encoded.
 base_string += f"{method}&{quote_plus(url)}&{quote(params_string)}"
 
-# sign signature of /live_session_token request using signature key
-signer = PKCS1_v1_5_Signature.new(signature_key)
-hash = SHA256.new(base_string.encode("utf-8"))
-encoded_signature = base64.encodebytes(signer.sign(hash))
-oauth_sig = quote_plus(encoded_signature.decode("utf-8").replace("\n", ""))
+# Convert base string str to bytestring.
+encoded_base_string = base_string.encode("utf-8")
+# Generate SHA256 hash of base string bytestring.
+sha256_hash = SHA256.new(data=encoded_base_string)
 
-# add signature and realm to OAuth header parameters
-oauth_params["oauth_signature"] = oauth_sig
+# Generate bytestring PKCS1v1.5 signature of base string hash.
+# RSA signing key is private signature key.
+bytes_pkcs115_signature = PKCS1_v1_5_Signature.new(
+    rsa_key=signature_key
+    ).sign(msg_hash=sha256_hash)
+
+# Generate str from base64-encoded bytestring signature.
+b64_str_pkcs115_signature = base64.b64encode(bytes_pkcs115_signature).decode("utf-8")
+
+# URL-encode the base64 signature str and add to oauth params dict.
+oauth_params['oauth_signature'] = quote_plus(b64_str_pkcs115_signature)
+
+# Oauth realm param omitted from signature, added to header afterward.
 oauth_params["realm"] = realm
-headers = {"Authorization": "OAuth " + ", ".join([f'{k}="{v}"' for k, v in sorted(oauth_params.items())])}
-headers["User-Agent"] = "python-requests/2.31.0"
 
-# send request to /live_session_token
-req = requests.Request(method=method, url=url, headers=headers)
-response = session_object.send(req.prepare())
-print(pretty_request_response(response))
+# Assemble oauth params into auth header value as comma-separated str.
+oauth_header = "OAuth " + ", ".join([f'{k}="{v}"' for k, v in sorted(oauth_params.items())])
 
-# if response is not 200, print error and exit script
-if not response.ok:
+# Create dict for LST request headers including OAuth Authorization header.
+headers = {"Authorization": oauth_header}
+
+# Add User-Agent header, required for all requests. Can have any value.
+headers["User-Agent"] = "python/3.11"
+
+# Prepare and send request to /live_session_token, print request and response.
+lst_request = requests.Request(method=method, url=url, headers=headers)
+lst_response = session_object.send(lst_request.prepare())
+print(pretty_request_response(lst_response))
+
+# Check if request returned 200, proceed to compute LST if true, exit if false.
+if not lst_response.ok:
     print(f"ERROR: Request to /live_session_token failed. Exiting...")
     raise SystemExit(0)
 
-# proceed to calculate LST if 200 received
-response_data = response.json()
+# Script not exited, proceed to compute LST.
+response_data = lst_response.json()
 dh_response = response_data["diffie_hellman_response"]
 lst_signature = response_data["live_session_token_signature"]
+lst_expiration = response_data["live_session_token_expiration"]
 
-# calculate LST
-prepend_bytes = [int(byte) for byte in bytearray.fromhex(prepend)]
-a = int(dh_random, 16)
+# -------------
+# Compute LST.
+# -------------
+
+# Generate bytestring from prepend hex str.
+prepend_bytes = bytes.fromhex(prepend)
+
+# Convert hex string response to integer and compute K=B^a mod p.
+# K will be used to hash the prepend bytestring (the decrypted 
+# access token) to produce the LST.
+a = dh_random
 B = int(dh_response, 16)
-K = pow(B, a, int(dh_prime, 16))
-hex_string = hex(K)[2:]
-if len(hex_string) % 2 > 0:
-    hex_string = "0" + hex_string
-byte_array = []
-if len(bin(K)[2:]) % 8 == 0:
-    byte_array.append(0)
-for i in range(0, len(hex_string), 2):
-    byte_array.append(int(hex_string[i:i+2], 16))
-hmac = HMAC.new(bytes(byte_array), digestmod=SHA1)
-hmac.update(bytes(prepend_bytes))
-lst = base64.b64encode(hmac.digest()).decode("utf-8")
+p = dh_prime
+K = pow(B, a, p)
 
-# validate LST using the lst_signature received
-val_hmac = HMAC.new(bytes(base64.b64decode(lst)), digestmod=SHA1)
-val_hmac.update(bytes(consumer_key, "utf-8"))
-if val_hmac.hexdigest() == lst_signature:
-    # validation successful, setting live_session_token and lst_expiration
-    live_session_token = lst
-    lst_expiration = response_data["live_session_token_expiration"]
+# Generate hex string representation of integer K.
+hex_str_K = hex(K)[2:]
+
+# If hex string K has odd number of chars, add a leading 0, 
+# because all Python hex bytes must contain two hex digits 
+# (0x01 not 0x1).
+if len(hex_str_K) % 2:
+    print("adding leading 0 for even number of chars")
+    hex_str_K = "0" + hex_str_K
+
+# Generate hex bytestring from hex string K.
+hex_bytes_K = bytes.fromhex(hex_str_K)
+
+# Prepend a null byte to hex bytestring K if lacking sign bit.
+if len(bin(K)[2:]) % 8 == 0:
+    hex_bytes_K = bytes(1) + hex_bytes_K
+
+# Generate bytestring HMAC hash of hex prepend bytestring.
+# Hash key is hex bytestring K, method is SHA1.
+bytes_hmac_hash_K = HMAC.new(
+    key=hex_bytes_K,
+    msg=prepend_bytes,
+    digestmod=SHA1,
+    ).digest()
+
+# The computed LST is the base64-encoded HMAC hash of the
+# hex prepend bytestring.
+# Converted here to str.
+computed_lst = base64.b64encode(bytes_hmac_hash_K).decode("utf-8")
+
+# -------------
+# Validate LST
+# -------------
+
+# Generate hex-encoded str HMAC hash of consumer key bytestring.
+# Hash key is base64-decoded LST bytestring, method is SHA1.
+hex_str_hmac_hash_lst = HMAC.new(
+    key=base64.b64decode(computed_lst),
+    msg=consumer_key.encode("utf-8"),
+    digestmod=SHA1,
+).hexdigest()
+
+# If our hex hash of our computed LST matches the LST signature
+# received in response, we are successful.
+if hex_str_hmac_hash_lst == lst_signature:
+    live_session_token = computed_lst
+    lst_expiration = lst_expiration
+    print("Live session token computation and validation successful.")
     print(f"LST: {live_session_token} ; expires: {datetime.fromtimestamp(lst_expiration/1000)}\n")
 else:
-    # exit if validation fails
     print(f"ERROR: LST validation failed. Exiting...")
     raise SystemExit(0)
     
@@ -156,7 +245,7 @@ else:
 # Request #2: Using LST to request /portfolio/accounts
 # -------------------------------------------------------------------
 
-# make signature base string for request to /portfolio/accounts
+# Initial, non-computed elements of request to /portfolio/accounts.
 method = 'GET'
 url = 'https://api.ibkr.com/v1/api/portfolio/accounts'
 oauth_params = {
@@ -166,21 +255,50 @@ oauth_params = {
         "oauth_timestamp": str(int(datetime.now().timestamp())),
         "oauth_token": access_token
     }
+
+# ----------------------------------
+# Generate request OAuth signature.
+# ----------------------------------
+
+# Combined param key=value pairs must be sorted alphabetically by key
+# and ampersand-separated.
 params_string = "&".join([f"{k}={v}" for k, v in sorted(oauth_params.items())])
+
+# Base string = method + url + sorted params string, all URL-encoded.
 base_string = f"{method}&{quote_plus(url)}&{quote(params_string)}"
 
-# sign signature for request using LST
-hmac = HMAC.new(bytes(base64.b64decode(live_session_token)),digestmod=SHA256)
-hmac.update(base_string.encode("utf-8"))
-oauth_sig = quote_plus(base64.b64encode(hmac.digest()).decode("utf-8"))
+# Generate bytestring HMAC hash of base string bytestring.
+# Hash key is base64-decoded LST bytestring, method is SHA256.
+bytes_hmac_hash = HMAC.new(
+    key=base64.b64decode(live_session_token), 
+    msg=encoded_base_string,
+    digestmod=SHA256
+    ).digest()
 
-# add signature and realm to OAuth header parameters
-oauth_params["oauth_signature"] = oauth_sig
+# Generate str from base64-encoded bytestring hash.
+b64_str_hmac_hash = base64.b64encode(bytes_hmac_hash).decode("utf-8")
+
+# URL-encode the base64 hash str and add to oauth params dict.
+oauth_params["oauth_signature"] = quote_plus(b64_str_hmac_hash)
+
+# Oauth realm param omitted from signature, added to header afterward.
 oauth_params["realm"] = realm
-headers = {"Authorization": "OAuth " + ", ".join([f'{k}="{v}"' for k, v in sorted(oauth_params.items())])}
-headers["User-Agent"] = "python-requests/2.31.0"
 
-# send request to /portfolio/accounts
-req = requests.Request(method=method, url=url, headers=headers)
-response = session_object.send(req.prepare())
-print(pretty_request_response(response))
+# Assemble oauth params into auth header value as comma-separated str.
+oauth_header = "OAuth " + ", ".join([f'{k}="{v}"' for k, v in sorted(oauth_params.items())])
+
+# Create dict for LST request headers including OAuth Authorization header.
+headers = {"Authorization": oauth_header}
+
+# Add User-Agent header, required for all requests. Can have any value.
+headers["User-Agent"] = "python/3.11"
+
+# Prepare and send request to /portfolio/accounts, print request and response.
+accounts_request = requests.Request(method=method, url=url, headers=headers)
+accounts_response = session_object.send(accounts_request.prepare())
+print(pretty_request_response(accounts_response))
+
+# Store web API session cookie value, if it is received.
+# (Used when opening websocket.)
+if 'api' in accounts_response.cookies.get_dict():
+    session_cookie = accounts_response.cookies.get_dict()['api']
