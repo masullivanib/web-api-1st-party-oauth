@@ -3,6 +3,8 @@ import requests
 import random
 import base64
 import pprint
+import websocket
+from threading import Thread
 from datetime import datetime
 from time import time, ctime
 from urllib.parse import quote, quote_plus
@@ -29,6 +31,8 @@ class WebAPISession:
         self.domain = domain
         self.env = env
         self.session_object = requests.Session()
+        self.websocket = None
+        self.ws_thread = None
 
         for k, v in read_in_config(config_path).items():
             setattr(self, k, v)
@@ -454,7 +458,49 @@ class WebAPISession:
         print(print_mask.format(auth_status))
         return response
         
+    def open_websocket(
+            self, 
+            verbose: bool = False,
+            ) -> dict | str:
+        self.ws_thread = Thread(target=self.__run_websocket)
+        self.ws_thread.start()
 
+    def __run_websocket(self, verbose: bool = False,) -> dict | str:
+        session = self.request("POST", "/tickle", verbose=False)["session"]
+        ws_url = f"wss://api.ibkr.com/v1/api/ws?oauth_token={self.access_token}"
+        self.websocket = websocket.WebSocketApp(
+            url=ws_url,
+            on_error=self.__ws_on_error,
+            on_close=self.__ws_on_close,
+            on_message=self.__ws_on_message, 
+            header=["User-Agent: python/3.11"],
+            cookie=f"api={session}",
+            )
+        self.websocket.on_open = self.__ws_on_open
+        self.websocket.run_forever()
+
+    def send_ws(self, message: str):
+        print(
+            datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            f"<- WS SEND: {message}\n", 
+            )
+        self.websocket.send(message)
+
+    def __ws_on_open(self, websocket):
+        print("Websocket open.")
+
+    def __ws_on_error(self, websocket, error):
+        print(error)
+
+    def __ws_on_close(self, websocket, close_status_code, close_msg):
+        print("Websocket closed.")
+
+    def __ws_on_message(self, websocket, message):
+        print(
+            datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            f"-> WS RECV: {message.decode('utf-8')}\n", 
+            )
+        
 # ----------------------------------------------------------------------------
 
 # List of response headers to print (all others discarded)
