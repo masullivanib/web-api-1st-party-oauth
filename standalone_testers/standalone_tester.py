@@ -60,7 +60,7 @@ with open("./path/to/private_encryption.pem", "r") as f:
 with open("./path/to/private_signature.pem", "r") as f:
     signature_key = RSA.importKey(f.read())
 
-# Replace with path to DH prime PEM file.
+# Replace with path to DH param PEM file.
 with open("./path/to/dhparam.pem", "r") as f:
     dh_param = RSA.importKey(f.read())
     dh_prime = dh_param.n
