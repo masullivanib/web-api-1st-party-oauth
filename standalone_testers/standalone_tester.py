@@ -49,31 +49,53 @@ def pretty_request_response(resp: requests.Response) -> str:
     return return_str
 
 # -------------------------------------------------------------------
-# Prequisites: Enter paths to keys and access token/secret below
+# Prequisites: Enter consumer key, access token & secret, and paths
+# to the consumer key's three associated PEM files:
+# The private encryption key, the private signature key, and the
+# Diffie-Hellman parameters (dhparam) file
 # -------------------------------------------------------------------
 
-# Replace with path to private encryption key file.
-with open("./path/to/private_encryption.pem", "r") as f:
-    encryption_key = RSA.importKey(f.read())
+# The consumer key value identifies the software (the API consumer) that 
+# will be making requests on your behalf by way of your prior grant of 
+# authorization.
+# All IB paper usernames can authorize the default TESTCONS consumer, or
+# you can create and authorize your own consumer key for first-party use
+# via the self-service portal.
+# Note below how TESTCONS uses its own special realm value, 'test_realm',
+# while all other consumer keys use 'limited_poa'.
+consumer_key = "TESTCONS"
 
-# Replace with path to private signature key file.
-with open("./path/to/private_signature.pem", "r") as f:
-    signature_key = RSA.importKey(f.read())
-
-# Replace with path to DH param PEM file.
-with open("./path/to/dhparam.pem", "r") as f:
-    dh_param = RSA.importKey(f.read())
-    dh_prime = dh_param.n
-    dh_generator = dh_param.e  # always =2
-
-# Enter your access token and access token secret here.
+# Enter your access token and access token secret that were generated
+# by authorizing the above consumer key.
 access_token = ""
 access_token_secret = ""
 
-# If substituting your own consumer key created via the Self-Service Portal,
-# change realm to "limited_poa" (test_realm is for TESTCONS only).
-consumer_key = "TESTCONS"
-realm = "test_realm"
+# Change the following variables to paths pointing to the private keys
+# DH param file associated with the consumer key above.
+path_to_encryption_key = "./path/to/private_encryption_key.pem"
+path_to_signature_key = "./path/to/private_signature_key.pem"
+path_to_dhparam = "./path/to/dhparam.pem"
+
+# ---------------------------------
+# Process data from above prereqs.
+# ---------------------------------
+
+# Read in values from the provided PEM file paths.
+with open(path_to_encryption_key, "r") as f:
+    encryption_key = RSA.importKey(f.read())
+with open(path_to_signature_key, "r") as f:
+    signature_key = RSA.importKey(f.read())
+with open(path_to_dhparam, "r") as f:
+    dh_param = RSA.importKey(f.read())
+    dh_prime = dh_param.n
+    dh_generator = dh_param.e  # we will always use generator=2
+
+# Here we set the realm according to the consumer key above.
+# The special realm 'test_realm' is only used with our generic paper-only
+# TESTCONS consumer key. Any other client-generated consumer key will use
+# the 'limited_poa' realm regardless of whether the authorized username
+# is paper or production.
+realm = "test_realm" if consumer_key == "TESTCONS" else "limited_poa"
 
 session_object = requests.Session()
 live_session_token = None
