@@ -325,8 +325,3 @@ headers["User-Agent"] = "python/3.11"
 accounts_request = requests.Request(method=method, url=url, headers=headers)
 accounts_response = session_object.send(accounts_request.prepare())
 print(pretty_request_response(accounts_response))
-
-# Store web API session cookie value, if it is received.
-# (Used when opening websocket.)
-if 'api' in accounts_response.cookies.get_dict():
-    session_cookie = accounts_response.cookies.get_dict()['api']
