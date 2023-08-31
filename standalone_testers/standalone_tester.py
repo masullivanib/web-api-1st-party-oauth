@@ -237,7 +237,6 @@ hex_str_hmac_hash_lst = HMAC.new(
 # received in response, we are successful.
 if hex_str_hmac_hash_lst == lst_signature:
     live_session_token = computed_lst
-    lst_expiration = lst_expiration
     print("Live session token computation and validation successful.")
     print(f"LST: {live_session_token} ; expires: {datetime.fromtimestamp(lst_expiration/1000)}\n")
 else:
@@ -270,6 +269,9 @@ params_string = "&".join([f"{k}={v}" for k, v in sorted(oauth_params.items())])
 
 # Base string = method + url + sorted params string, all URL-encoded.
 base_string = f"{method}&{quote_plus(url)}&{quote(params_string)}"
+
+# Convert base string str to bytestring.
+encoded_base_string = base_string.encode("utf-8")
 
 # Generate bytestring HMAC hash of base string bytestring.
 # Hash key is base64-decoded LST bytestring, method is SHA256.
