@@ -1,0 +1,24 @@
+~~~~~ 14:12:40 c:\Users\ms186\IBKR\Projects\OAuth-Python\runner.py
+14:12:40.334 REQUEST----------------------------------------------------------
+POST https://api.ibkr.com/v1/api/iserver/auth/status
+User-Agent: python/3.11
+Cookie: api=6b382a5ff7eb5b498048a087b87f4295
+Authorization: OAuth oauth_consumer_key="TESTCONS",
+    oauth_nonce="77a5c01450abfcedb66707678669a017",
+    oauth_signature="8%2B8Jf9pkq2xbU4go%2FNfOGbiQV0YZAXWofj4KmXdNRqo%3D",
+    oauth_signature_method="HMAC-SHA256",
+    oauth_timestamp="1712772760",
+    oauth_token="xxxxxxxxxxxxxxxxx",
+    realm="test_realm"
+Content-Length: 0
+14:12:40.736 RESPONSE elapsed=401.575
+200 OK
+Content-Type: application/json;charset=utf-8
+Date: Wed, 10 Apr 2024 18:13:26 GMT
+Content-Length: 85
+Set-Cookie: api=ddbbf21e34c60566d44711ffb4e06006; Path=/; Secure;Secure;HttpOnly;SameSite=None;SameSite=None, x-sess-uuid=0.2fbe1cb8.1712772806.169a9f; secure; HttpOnly
+
+{'MAC': 'AA:AA:AA:AA:AA:AA',
+ 'authenticated': False,
+ 'competing': False,
+ 'connected': False}
