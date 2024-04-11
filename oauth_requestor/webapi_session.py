@@ -4,45 +4,103 @@ import random
 import base64
 import pprint
 import websocket
-from threading import Thread
+import threading
+from pathlib import Path
 from datetime import datetime
 from time import time, ctime
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, unquote
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15 as PKCS1_v1_5_Signature
 from Crypto.Cipher import PKCS1_v1_5 as PKCS1_v1_5_Cipher
 from Crypto.Hash import SHA256, HMAC, SHA1
 
+get, post, delete, put = "get", "post", "delete", "put"
 
-class WebAPISession:
+class WebAPIConsumer:
     """Class to handle web API session with authentication via OAuth."""
 
     def __init__(
         self,
-        config_path: str,
+        *,
         init_brokerage: bool = True,
-        logging: bool = True,
         verbose: bool = True,
+        print_all_headers: bool = False,
+        logging: bool = True,
+        log_path: str = "",
         domain: str = 'api.ibkr.com',
-        env: str = 'v1'
+        env: str = 'v1/api',
+        consumer_key: str,
+        encryption_key: bytes,
+        signature_key: bytes,
+        dhparam: bytes,
+        access_token: str,
+        access_token_secret: str,
+        live_session_token: str = "",
+        lst_expiration: int = 0,
+        session_cookie: str = "",
+        session_cookie_updated: int = 0,
+        session_cache_path: str
     ):
-        self.logging, self.verbose = logging, verbose
-        self.config_path = config_path
-        self.domain = domain
-        self.env = env
+        self.execution_start_time = int(time()*1000)
+        self.first_request_flag = True
+        
         self.session_object = requests.Session()
+        self.user_agent = "python/3.11"
         self.websocket = None
         self.ws_thread = None
+        self.ws_open_flag = threading.Event()
+        self.ws_msg_method = None
 
-        for k, v in read_in_config(config_path).items():
-            setattr(self, k, v)
+        self.domain, self.env = domain, env
+        self.logging, self.verbose = logging, verbose
+        self.headers_to_print = lambda rhs: rhs & {
+            "Content-Type", 
+            "Content-Length", 
+            "Date", 
+            "Set-Cookie"
+        } if not print_all_headers else rhs
 
-        self.log_path = f"{self.log_dir}/{datetime.now().strftime('%Y-%m-%d')}_log.txt"
+        self.consumer_key = consumer_key
+        self.access_token = access_token
+        self.access_token_secret = access_token_secret
+        self.realm = "test_realm" if consumer_key == "TESTCONS" else "limited_poa"
 
-        if not self.live_session_token or self.__is_lst_expiring(self.lst_expiration):
+        try:
+            self.encryption_key = RSA.importKey(encryption_key)
+            self.signature_key = RSA.importKey(signature_key)
+            self.dhparam = RSA.importKey(dhparam)
+        except (ValueError, IndexError) as e:
+            print(f"{e}\n{{}}\nExiting...".format(
+                "Ensure that the provided key data bytestrings are valid, \
+                    PEM-encoded RSA keys."
+            ))
+            raise SystemExit(0)
+        
+        try:
+            self.session_cache_path = Path(session_cache_path).resolve(strict=False)
+            self.session_cache_path.touch(exist_ok=True)
+            if self.logging:
+                self.log_path = Path(log_path).resolve(strict=False)
+                self.log_path.touch(exist_ok=True)
+        except (OSError, ValueError) as e:
+            print(f"{e}\nExiting...")
+            raise SystemExit(0)
+
+        self.live_session_token = live_session_token
+        self.lst_expiration = lst_expiration
+        self.session_cookie = session_cookie
+        self.session_cookie_updated = session_cookie_updated
+
+        if not live_session_token or self.__is_lst_expiring(lst_expiration):
             self.get_live_session_token()
         else:
-            print(f"Valid LST found: {self.live_session_token} expires {ctime(self.lst_expiration/1000)}\n")
+            self.live_session_token = live_session_token
+            self.lst_expiration = lst_expiration
+            print("***Valid LST found: {} expires {}\n".format(
+                self.live_session_token,
+                ctime(self.lst_expiration/1000)
+            ))
+
         if init_brokerage:
             self.init_brokerage_session(verbose=False)
 
@@ -162,12 +220,14 @@ class WebAPISession:
         oauth_params["realm"] = self.realm
 
         # Assemble oauth params into auth header value as comma-separated str.
-        oauth_header = "OAuth " + ", ".join([f'{k}="{v}"' for k, v in sorted(oauth_params.items())])
+        oauth_header = "OAuth " + ", ".join(
+            [f'{k}="{v}"' for k, v in sorted(oauth_params.items())]
+        )
 
         # Return Authorization: OAuth header as dict.
         return {"Authorization": oauth_header}
     
-    def get_live_session_token(self, verbose=False) -> None:
+    def get_live_session_token(self, verbose=True) -> None:
         """Constructs and sends request to /live_session_token endpoint.
         If request is successful, computes LST from the returned DH response, 
         validates computed LST against the returned LST signature, and caches
@@ -180,16 +240,16 @@ class WebAPISession:
             None
         """
         method = "POST"
-        url = f"https://{self.domain}/{self.env}/api/oauth/live_session_token"
+        url = f"https://{self.domain}/{self.env}/oauth/live_session_token"
 
         # Generate a random 256-bit integer.
         dh_random = random.getrandbits(256)
 
         # Compute the Diffie-Hellman challenge:
-        # generator ^ dh_random % dh_prime
-        # Note that IB always uses generator = 2.
+        # generator ^ dh_random % dhparam.n
+        # Note that IB always uses generator = 2 (dhparam.e).
         # Convert result to hex and remove leading 0x chars.
-        dh_challenge = hex(pow(base=self.dh_generator, exp=dh_random, mod=self.dh_prime))[2:]
+        dh_challenge = hex(pow(base=self.dhparam.e, exp=dh_random, mod=self.dhparam.n))[2:]
 
         # Generate the base string prepend for the OAuth signature:
         # Decrypt the access token secret bytestring using private encryption
@@ -234,7 +294,7 @@ class WebAPISession:
             # access token) to produce the LST.
             a = dh_random
             B = int(dh_response, 16)
-            p = self.dh_prime
+            p = self.dhparam.n
             K = pow(B, a, p)
 
             # Generate hex string representation of integer K.
@@ -284,15 +344,24 @@ class WebAPISession:
             if hex_str_hmac_hash_lst == lst_signature:
                 self.live_session_token = computed_lst
                 self.lst_expiration = lst_expiration
-                write_lst(self.lst_cache_fp, computed_lst, lst_expiration)
+                self.__write_session_cache()
                 print(f"Generated new LST: {computed_lst} expires {ctime(lst_expiration/1000)}\n")
             else:
                 print(f"ERROR: LST validation failed. Exiting...")
                 raise SystemExit(0)
-            
+
+    def __write_session_cache(self) -> None:
+        self.session_cache_path.write_text(json.dumps({
+                'live_session_token': self.live_session_token,
+                'lst_expiration': self.lst_expiration,
+                'session_cookie': self.session_cookie,
+                'session_cookie_updated': self.session_cookie_updated,
+            }
+        ))
+
     def __send_request(
             self, 
-            verbose: bool = None, 
+            verbose: bool, 
             **kwargs,
         ) -> requests.Response:
         """Helper method to dispatch, print, and log arbitrary HTTP requests.
@@ -305,23 +374,15 @@ class WebAPISession:
             requests.Response object
         """
         verbose = self.verbose if verbose is None else verbose
-        req = requests.Request(**kwargs)
-        response = self.session_object.send(req.prepare(), allow_redirects=False)
-
-        if 'api' in response.cookies.get_dict():
-            self.api_session = response.cookies.get_dict()['api']
-            write_session(self.session_cache_fp, self.api_session, int(time()*1000))
-
-        pretty_out_str = pretty_request_response(response)
-        if verbose:
-            print(pretty_out_str)
-        else:
-            print(f"REQUEST: {response.request.method} {response.request.url}")
-            print(f"RESPONSE: {response.status_code} {response.reason}\n")
-        if self.logging:
-            with open(self.log_path, 'a') as f: 
-                f.write(pretty_out_str)
-        return response
+        req = requests.Request(**kwargs).prepare()
+        self.__print_and_log_request(req=req, verbose=verbose, logging=self.logging)
+        resp = self.session_object.send(req, allow_redirects=False)
+        self.__print_and_log_response(resp=resp, verbose=verbose, logging=self.logging)
+        if 'api' in resp.cookies.get_dict():
+            self.session_cookie = resp.cookies.get_dict()['api']
+            self.session_cookie_updated = int(time()*1000)
+            self.__write_session_cache()
+        return resp
 
     def request(
             self,
@@ -365,8 +426,8 @@ class WebAPISession:
         req_headers = {'User-Agent': 'python/3.11'}
 
         # only add a Cookie header for API session if we have one stored
-        if self.api_session:
-            req_headers['Cookie'] = f"api={self.api_session}"
+        if self.session_cookie:
+            req_headers['Cookie'] = f"api={self.session_cookie}"
 
         method = method.upper()
 
@@ -381,7 +442,7 @@ class WebAPISession:
         else:
             base_uri = path
 
-        url = f"https://{domain}/{env}/api{base_uri}"
+        url = f"https://{domain}/{env}{base_uri}"
 
         auth_header = self.__make_auth_header(method, url, query_params_dict)
         # add Authorization header to dict of request's headers
@@ -397,10 +458,21 @@ class WebAPISession:
             params=query_params_dict,
             json=body,
             )
-        try:
-            return response.json()
-        except json.JSONDecodeError:
-            return response.text
+        if response.status_code == 401 and self.first_request_flag:
+            self.get_live_session_token(verbose)
+            self.first_request_flag = False
+            self.request(method, path, body, headers, domain, env, verbose)
+        else:
+            response_return = {
+                "status": response.status_code,
+                "reason": response.reason,
+                "obj": response
+            }
+            try:
+                response_return["body"] = response.json()
+            except json.JSONDecodeError:
+                response_return["body"] = response.text
+            return response_return
 
     def init_brokerage_session(
             self, 
@@ -427,165 +499,204 @@ class WebAPISession:
         """
         if renew:
             auth_status = False
-            print_mask = 'Force-renew brokerage session: authenticated={}\n'
+            print_mask = '***Force-renew brokerage session: authenticated={}\n'
         else:
             response = self.request(
                 "POST", 
                 "/iserver/auth/status", 
                 verbose=verbose,
                 )
-            auth_status = response["authenticated"]
-            
+            auth_status = response["body"]["authenticated"]
+            # auth_status = False
+
         if auth_status:
-            print_mask = 'Brokerage session already exists: authenticated={}\n'
+            print_mask = '***Brokerage session already exists: authenticated={}\n'
         else:
             params = f"publish={publish}&compete={compete}".lower()
             response = self.request(
-                "POST", 
+                "GET", 
                 f"/iserver/auth/ssodh/init?{params}", 
                 verbose=verbose,
                 )
-            if isinstance(response, dict):
-                auth_status = response["authenticated"]
+            # print(response.json())
+            if isinstance(response["body"], dict):
+                auth_status = response["body"]["authenticated"]
                 if bool(auth_status):
-                    print_mask = 'Opened brokerage session: authenticated={}\n'
+                    print_mask = '***Opened brokerage session: authenticated={}\n'
                 else:
-                    print_mask = 'Failed to open brokerage session: authenticated={}\n'
+                    print_mask = '***Failed to open brokerage session: authenticated={}\n'
             else:
-                auth_status = response
-                print_mask = 'Request to /iserver/auth/ssodh/init failed: {}\n'
+                auth_status = f"{response['status']} {response['reason']} {response['body']}"
+                print_mask = '***Request to /iserver/auth/ssodh/init failed: {}\n'
 
         print(print_mask.format(auth_status))
         return response
-        
+    
     def open_websocket(
-            self, 
+            self,
+            method = None, 
+            get_cookie: bool = True,
             verbose: bool = False,
             ) -> dict | str:
-        self.ws_thread = Thread(target=self.__run_websocket)
+        if get_cookie:
+            self.get_session_cookie(verbose)
+        self.ws_msg_method = method
+        self.ws_thread = threading.Thread(target=self.__run_websocket, args=[verbose])
         self.ws_thread.start()
 
+    def send_websocket(
+            self, 
+            message: str = "",
+        ) -> bool:
+        def __thread_send(message: str):
+            self.ws_open_flag.wait()
+            if message[-1] == '+':
+                message = message + '{}'
+            message = message.replace("'", '"').replace(' ', '')
+            self.__print_and_log_ws_message(recv=False, msg=message, logging=self.logging)
+            self.websocket.send(message)
+            
+        if self.ws_thread.is_alive():
+            if '{"session":' in message:
+                self.__print_and_log_ws_message(recv=False, msg=message, logging=self.logging)
+                self.websocket.send(message)
+            else:
+                threading.Thread(target=__thread_send, args=[message]).start()
+            return True
+        else:
+            print("***Error: Websocket does not exist.")
+            return False
+        
+    def close_websocket(self) -> bool:
+        self.websocket.close(status=1000)
+
     def __run_websocket(self, verbose: bool = False,) -> dict | str:
-        session = self.request("POST", "/tickle", verbose=False)["session"]
-        ws_url = f"wss://api.ibkr.com/v1/api/ws?oauth_token={self.access_token}"
+        ws_url = f"wss://{self.domain}/{self.env}/ws?oauth_token={self.access_token}"
+        cookie_arg = {"cookie": f"api={self.session_cookie}"} if self.session_cookie else {}
+        user_agent = {"User-Agent": self.user_agent}
+        self.__print_and_log_request(
+            req=(ws_url, dict(**cookie_arg, **user_agent)), 
+            verbose=verbose, 
+            logging=self.logging,
+        )
         self.websocket = websocket.WebSocketApp(
             url=ws_url,
             on_error=self.__ws_on_error,
             on_close=self.__ws_on_close,
             on_message=self.__ws_on_message, 
-            header=["User-Agent: python/3.11"],
-            cookie=f"api={session}",
+            header=[f"{k}: {v}" for k, v in user_agent.items()],
+            **cookie_arg,
             )
+        self.__print_and_log_response(
+            resp=self.websocket.has_errored, 
+            verbose=verbose, 
+            logging=self.logging,
+        )
         self.websocket.on_open = self.__ws_on_open
         self.websocket.run_forever()
-
-    def send_ws(self, message: str):
-        print(
-            datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            f"<- WS SEND: {message}\n", 
-            )
-        self.websocket.send(message)
-
+    
     def __ws_on_open(self, websocket):
-        print("Websocket open.")
+        print("***Websocket open.")
 
     def __ws_on_error(self, websocket, error):
-        print(error)
+        # print(f"Error: {error}")
+        pass
 
     def __ws_on_close(self, websocket, close_status_code, close_msg):
-        print("Websocket closed.")
+        self.ws_open_flag.clear()
+        self.websocket = None
+        print("***Websocket closed.")
 
     def __ws_on_message(self, websocket, message):
-        print(
-            datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            f"-> WS RECV: {message.decode('utf-8')}\n", 
-            )
-        
-# ----------------------------------------------------------------------------
-
-# List of response headers to print (all others discarded)
-RESP_HEADERS_TO_PRINT = ["Content-Type", "Content-Length", "Date", "Set-Cookie", "User-Agent"]
-
-def pretty_request_response(resp: requests.Response) -> str:
-    """Print request and response legibly when verbose=True. 
-    Also used for logging.
-    """
-    req = resp.request
-    rqh = '\n'.join(f"{k}: {v}" for k, v in req.headers.items())
-    rqh = rqh.replace(', ', ',\n    ')
-    rqb = f"\n{pprint.pformat(json.loads(req.body))}\n" if req.body else ""
-    try:
-        rsb = f"\n{pprint.pformat(resp.json())}\n" if resp.text else ""
-    except json.JSONDecodeError:
-        rsb = resp.text
-    rsh = '\n'.join([f"{k}: {v}" for k, v in resp.headers.items() if k in RESP_HEADERS_TO_PRINT])
-    return_str = '\n'.join([
-        80*'-',
-        '-----------REQUEST-----------',
-        f"{req.method} {req.url}",
-        rqh,
-        f"{rqb}",
-        '-----------RESPONSE-----------',
-        f"{resp.status_code} {resp.reason}",
-        rsh,
-        f"{rsb}\n",
-    ])
-    return return_str
-
-def read_in_config(config_path: str) -> dict:
-    """Read in fixed authentication keys/tokens from files."""
-    try:
-        with open(f"{config_path}/config.json", "r") as f:
-            session_dict = json.load(f)
-        assert all(k in session_dict for k in ("consumer_fp", "access_fp", "lst_cache_fp", "session_cache_fp", "log_dir"))
-        for k, v in session_dict.items():
-            session_dict[k] = f"{config_path}{v[1:]}" if v[:2] == './' else v
-
-        with open(session_dict.pop("consumer_fp"), "r") as f:
-            consumer_dict = json.load(f)
-        assert all(k in consumer_dict for k in ("consumer_key", "encryption_key_fp", "signature_key_fp", "dhparam_fp"))
-        session_dict["consumer_key"] = consumer_dict.pop("consumer_key")
-        for k, v in consumer_dict.items():
-            consumer_dict[k] = f"{config_path}{v[1:]}" if v[:2] == './' else v
-        with open(consumer_dict['encryption_key_fp'], "r") as f:
-            session_dict["encryption_key"] = RSA.importKey(f.read())
-        with open(consumer_dict['signature_key_fp'], "r") as f:
-            session_dict["signature_key"] = RSA.importKey(f.read())
-        with open(consumer_dict['dhparam_fp'], "r") as f:
-            dh_param = RSA.importKey(f.read())
-            session_dict["dh_prime"] = dh_param.n
-            session_dict["dh_generator"] = dh_param.e  # always =2
-
-        with open(session_dict.pop("access_fp"), "r") as f:
-            session_dict.update(json.load(f))
-        assert all(k in session_dict for k in ("access_token", "access_token_secret"))
-
-        session_dict["realm"] = "test_realm" if session_dict["consumer_key"] == "TESTCONS" else "limited_poa"
-
-        with open(session_dict["lst_cache_fp"], "r") as f:
-            session_dict.update(json.load(f))
-        with open(session_dict["session_cache_fp"], "r") as f:
-            session_dict.update(json.load(f))
-        return session_dict
-    except (OSError, KeyError, AssertionError) as e:
-        print(e)
-        print("Exiting...")
-        raise SystemExit(0)
+        str_msg = message.decode('utf-8')
+        self.__print_and_log_ws_message(recv=True, msg=str_msg, logging=self.logging)
+        if '"sts"' in str_msg: # previously used 'system' message as flag for ready ws, but this is too early
+            self.ws_open_flag.set()
+        try:
+            json_msg = json.loads(str_msg)
+            if json_msg['message'] == 'waiting for session':
+                self.get_session_cookie()
+                # self.send_websocket(message=f"{{\"session\":\"12345\"}}")
+                self.send_websocket(message=f"{{\"session\":\"{self.session_cookie}\"}}")
+            if self.ws_msg_method:
+                self.ws_msg_method(json_msg)
+        except json.JSONDecodeError:
+            print(f"***Decode error: {message}")
+            
+    def get_session_cookie(self, verbose: bool = False) -> str:
+        self.session_cookie = self.request("POST", "/tickle", verbose=verbose)["body"]["session"]
+        self.session_cookie_updated = int(time()*1000)
+        print('***Found session: {} retrieved {}'.format(
+            self.session_cookie,
+            ctime(self.session_cookie_updated/1000),
+        ))
+        self.__write_session_cache()
+        return self.session_cookie
     
-def write_lst(lst_cache_fp: str, lst: str, lst_expiration: str) -> None:
-    """Cache computed LST and expiration timestamp in JSON text file."""
-    lst_cache = {"live_session_token": lst, "lst_expiration": lst_expiration}
-    try:
-        with open(lst_cache_fp, "w") as f:
-            json.dump(lst_cache, f)
-    except OSError as e:
-        print(e)
-
-def write_session(session_cache_fp: str, sesh: dict, sesh_updated: str) -> None:
-    """Cache web API session cookie value and timestamp in JSON text file."""
-    session_cache = {"api_session": sesh, "api_session_updated": sesh_updated}
-    try:
-        with open(session_cache_fp, "w") as f:
-            json.dump(session_cache, f)
-    except OSError as e:
-        print(e)
+    def __print_and_log_request(
+            self, 
+            req: requests.PreparedRequest | tuple, 
+            verbose: bool, 
+            logging: bool,
+    ) -> None:
+        tstamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if isinstance(req, tuple):
+            rqm, rqu, rqh, rqb = 'GET', req[0], req[1], ''
+        else:
+            rqm, rqu, rqh = req.method, req.url, req.headers
+            rqb = f"\n{pprint.pformat(json.loads(req.body))}\n" if req.body else ""
+        rqh_fmt = '\n'.join(f"{k}: {v}" for k, v in rqh.items()).replace(', ', ',\n    ')
+        short_str = f"{tstamp} REQUEST{58*'-'}\n{rqm} {unquote(rqu)}"
+        long_str = f"{short_str}\n{rqh_fmt}\n{rqb}"
+        if logging:
+            with self.log_path.open('a') as f:
+                f.write(long_str)
+        print(long_str) if verbose else print(short_str)
+            
+    def __print_and_log_response(
+            self, 
+            resp: requests.Response | bool, 
+            verbose: bool, 
+            logging: bool,
+    ) -> None:
+        tstamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if isinstance(resp, bool):
+            rsc, rsr = 'Has errored:', str(resp)
+            rtt = rsh = rsb = ''
+        else:
+            rsc, rsr = resp.status_code, resp.reason
+            rsh_to_show = self.headers_to_print(set(resp.headers.keys()))
+            rsh = '\n'.join([f"{k}: {v}" for k, v in resp.headers.items() if k in rsh_to_show])
+            rtt = f"elapsed={round(resp.elapsed.total_seconds()*1000, 3)}\n"
+            try:
+                rsb = f"\n{pprint.pformat(resp.json())}\n" if resp.text else ""
+            except json.JSONDecodeError:
+                rsb = resp.text
+        short_str = f"{rsc} {rsr}\n"
+        long_str = f"{tstamp} RESPONSE {rtt}{short_str}{rsh}\n{rsb}\n"
+        if logging:
+            with self.log_path.open('a') as f:
+                f.write(long_str)
+        print(long_str) if verbose else print(short_str)
+        
+    def __print_and_log_ws_message(
+            self, 
+            recv: bool,
+            msg: str,
+            logging: bool,
+    ) -> None:
+        tstamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if recv:
+            recv_str = f"{tstamp} -> WS RECV"
+            try:
+                json_msg = json.loads(msg)
+                short_str = f"{recv_str} {json_msg['topic']}\n"
+                long_str = f"{recv_str} {json_msg['topic']} {msg}\n"
+            except:
+                short_str = long_str = f"{recv_str} {msg}\n"
+        else:
+            short_str = long_str = f"\n{tstamp} <- WS SEND {msg}\n"
+        if logging:
+            with self.log_path.open('a') as f:
+                f.write(long_str)
+        print(long_str) if self.verbose else print(short_str)
