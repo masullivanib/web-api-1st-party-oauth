@@ -1,0 +1,5 @@
+{
+    "encryption_key": "./consumers/TESTCONS/TESTCONS_private_encryption.pem",
+    "signature_key": "./consumers/TESTCONS/TESTCONS_private_signature.pem",
+    "dhparam": "./consumers/TESTCONS/TESTCONS_dhparam.pem"
+}
