@@ -26,12 +26,12 @@ from Crypto.Hash import SHA256, HMAC, SHA1
 # Prequisites: Enter paths to keys and access token/secret below
 # -------------------------------------------------------------------
 CONSUMER_KEY = "TESTCONS"
-PATH_TO_PRIVATE_ENCRYPTION_PEM = "C:\\Users\\ms186\\IBKR\\Projects\\OAuth-Python\\consumers\\TESTCONS\\TESTCONS_private_encryption.pem"
-PATH_TO_PRIVATE_SIGNATURE_PEM = "C:\\Users\\ms186\\IBKR\\Projects\\OAuth-Python\\consumers\\TESTCONS\\TESTCONS_private_signature.pem"
-PATH_TO_DH_PARAM_PEM = "C:\\Users\\ms186\\IBKR\\Projects\\OAuth-Python\\consumers\\TESTCONS\\TESTCONS_dhparam.pem"
+PATH_TO_PRIVATE_ENCRYPTION_PEM = ""
+PATH_TO_PRIVATE_SIGNATURE_PEM = ""
+PATH_TO_DH_PARAM_PEM = ""
 
-ACCESS_TOKEN = "c4b6c8ac0a16a8f40f76"
-ACCESS_TOKEN_SECRET = "vpWuGMnoacufJYIl0yxcJVq39wknffD5TR+Y2gaQdyll2wAn25v+gRndZEnzsIMEEpIMlJA370s6Z453mrvsaxdL/umT++H51UwWQ958UcTkdVkFkv6lrHEkpVy1af1jHoBdxfukjCXM7KnCy4EKYpKdTIr2DkTN/+5PuZp0zBdrIVFZV9sdialmJ30zjqQ6uWsSAiZ402nCHV7gboNE3bP1UlLVO40AdLQrihhoDt9Ync3OHok+psZoQfLMotbHw0d/gEZkFjmMHT+XaqG5NNfoSXofgvVMqo1EpJj20U4Kv5+y2jR/OIQeshq1pxKTejpX6PuTydkZ8PMltXaRww=="
+ACCESS_TOKEN = ""
+ACCESS_TOKEN_SECRET = ""
 
 
 def main():
@@ -82,11 +82,8 @@ def main():
     )
 
     authorized_request('GET', '/portfolio/accounts')
-
     authorized_request('POST', '/iserver/auth/ssodh/init', body={"publish": True, "compete": True})
-
     authorized_request('GET', '/iserver/accounts')
-
     authorized_request('POST', '/tickle')
 
 
@@ -346,8 +343,6 @@ def build_authorized_request(
     return authorized_request
 
 
-
-
 def pretty_request_response(resp: requests.Response) -> str:
     """Print request and response legibly."""
     def jsonner (obj, depth: int) -> str:
@@ -357,7 +352,7 @@ def pretty_request_response(resp: requests.Response) -> str:
         outstr, idt, max_w, n_items, is_dict = '', 2, 70, len(obj), isinstance(obj, dict)
         for i in range(0, n_items):
             k, v = (lambda x, y: (f"\"{x}\": ", y))(*list(obj.items())[i]) if is_dict else ('', obj[i])
-            outstr += f"{(depth + 1)*idt*' '}{k}{jsonner(v, depth + 1)}{',\n'*(i != n_items - 1)}"
+            outstr += f"{(depth + 1)*idt*' '}{k}{jsonner(v, depth + 1)}" + ',\n'*(i != n_items - 1)
         outstr = f"{'[{'[is_dict]}\n{outstr}\n{depth*idt*' '}{']}'[is_dict]}"
         return " ".join(s.strip() for s in outstr.split("\n")) if len(outstr) < max_w else outstr
     
